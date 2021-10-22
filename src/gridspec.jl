@@ -1,4 +1,4 @@
-import Unitful: Quantity
+using Unitful: Quantity, uconvert, @u_str
 
 struct GridSpec
     Nx::Int64
@@ -21,7 +21,6 @@ end
 # The continuous coordinates that belong to pixel i range from [i - 0.5, i + 0.5)
 # The origin of a grid is given by N // 2 + 1
 # (to be consistent with there the zeroth power component is place during fft)
-
 @inline @fastmath function lambda2px(ulambda, vlambda, gridspec::GridSpec)
     return (
         ulambda / gridspec.scaleuv + gridspec.Nx ÷ 2 + 1,
@@ -43,6 +42,13 @@ function px2lambda(upx, vpx, gridspec::GridSpec)
     )
 end
 
-function px2val(N, dx)
-    return (range(0, length=N) .- (N ÷ 2)) .* dx
+function px2sky(lpx, mpx, gridspec::GridSpec)
+    return (
+        (lpx - gridspec.Nx ÷ 2 - 1) * gridspec.scalelm,
+        (mpx - gridspec.Ny ÷ 2 - 1) * gridspec.scalelm
+    )
+end
+
+function px2sky(N::Int, gridspec::GridSpec)
+    return ((1:N) .- (N ÷ 2 + 1)) .* gridspec.scalelm
 end
