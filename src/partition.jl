@@ -21,12 +21,19 @@ function Subgrid(u0px, v0px, w0lambda; children::Union{Nothing, Vector{UVDatum}}
     return Subgrid(u0px, v0px, w0lambda, children)
 end
 
-function partition!(subgrids::Subgrids, mset::MeasurementSet, imageweighter)
+function Subgrids(gridspec::GridSpec, subgridspec::GridSpec, padding::Int)
+    Subgrids(gridspec, subgridspec, padding, Subgrid[])
+end
+
+function partition!(subgrids::Subgrids, uvdata)
     # Separate data in w layers and create UVData
-    wlayers = Dict{Int, Array{UVDatum, 1}}()
     println("Creating w layers...")
-    @time for row in mset
-        wlayerer!(wlayers, row, mset.lambdas, imageweighter)
+    wlayers = Dict{Int, Array{UVDatum, 1}}()
+    @time for uvdatum in uvdata
+        wlayer = get!(wlayers, round(Int, uvdatum.w)) do
+            UVDatum[]
+        end
+        push!(wlayer, uvdatum)
     end
 
     # Now distribute partitioning work to threads by w layer
@@ -48,51 +55,6 @@ function partition!(subgrids::Subgrids, mset::MeasurementSet, imageweighter)
 
     occupancy = [length(subgrid.children) for subgrid in subgrids.children]
     println("Subgrids: $(length(occupancy)) Occupancy (min/median/max): $(minimum(occupancy))/$(median(occupancy))/$(maximum(occupancy))")
-end
-
-function wlayerer!(wlayers, row, lambdas, imageweighter)
-    for (chan, lambda) in enumerate(lambdas)
-        u = row.uvw[1] / lambda
-        v = -row.uvw[2] / lambda
-        w = row.uvw[3] / lambda
-
-        # # Fake source at origin for testing
-        # # TODO: Remove (obviously)
-        # row.data[1, chan] = 1f0
-        # row.data[2, chan] = 0f0
-        # row.data[3, chan] = 0f0
-        # row.data[4, chan] = 1f0
-
-        # Apply weights and flags to image data
-        imageweights = imageweighter(u, v)
-        empty = true
-        for pol in 1:4
-            weight = (
-                !row.flag[pol, chan] * 
-                !row.flagrow[] *
-                row.weight[pol] *
-                row.weightspectrum[pol, chan] *
-                imageweights[pol]
-            )
-            if !isfinite(weight) || !isfinite(row.data[pol, chan])
-                row.data[pol, chan] = 0
-            else
-                empty = false
-                row.data[pol, chan] *= weight
-            end
-        end
-
-        if empty
-            continue
-        end
-
-        wlayer = get!(wlayers, round(Int, w)) do 
-            UVDatum[]
-        end
-        push!(wlayer, UVDatum(
-            u, v, w, row.data[1, chan], row.data[2, chan], row.data[3, chan], row.data[4, chan]
-        ))
-    end
 end
 
 function partitionconsumer(wlayer, gridspec, subgridspec, padding)

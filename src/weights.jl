@@ -1,6 +1,6 @@
 abstract type ImageWeight end
 struct Natural <: ImageWeight
-    totalweights::SVector{4, Float64}
+    normfactor::SVector{4, Float64}
 end
 struct Uniform <: ImageWeight end
 struct Briggs <: ImageWeight
@@ -9,37 +9,23 @@ struct Briggs <: ImageWeight
     normfactor::SVector{4, Float64}
 end
 
-function Natural(mset::MeasurementSet, gridspec::GridSpec)
-    totalweights = Float64[0, 0, 0, 0]
-    @views for row in mset
-        sumweights!(totalweights, row, mset.lambdas, gridspec)
-    end
-    return Natural(totalweights)
-end
-
-function sumweights!(totalweights, row, lambdas, gridspec)
-    for (chan, lambda) in enumerate(lambdas)
-        upx, vpx = lambda2px(Int, row.uvw[1] / lambda, row.uvw[2] / lambda, gridspec)
-
+function Natural(uvdata, gridspec::GridSpec)
+    normfactor = MVector{4, Float64}(0, 0, 0, 0)
+    for uvdatum in uvdata
+        upx, vpx = lambda2px(Int, uvdatum.u, uvdatum.v, gridspec)
         if 1 <= upx <= gridspec.Nx && 1 <= vpx <= gridspec.Ny
-            for pol in 1:4
-                weight = (
-                    !row.flag[pol, chan] *
-                    !row.flagrow[] * 
-                    row.weight[pol] *
-                    row.weightspectrum[pol, chan]
-                )
-                
-                if isfinite(weight)
-                    totalweights[pol] += weight
-                end
-            end
+            normfactor[1] += uvdatum.xx.re
+            normfactor[2] += uvdatum.xy.re
+            normfactor[3] += uvdatum.yx.re
+            normfactor[4] += uvdatum.yy.re
         end
     end
+
+    return Natural(normfactor)
 end
 
-function Briggs(mset::MeasurementSet, gridspec::GridSpec, robust::Float64)
-    griddedweights = makegriddedweights(mset, gridspec)
+function Briggs(uvdata, gridspec::GridSpec, robust::Float64)
+    griddedweights = makegriddedweights(uvdata, gridspec)
     f2 = (5 * 10^-robust)^2 ./ (sum(x -> x^2, griddedweights, dims=(2, 3)) ./ sum(griddedweights, dims=(2, 3)))
     imageweights = 1 ./ (1 .+ griddedweights .* f2)
 
@@ -49,35 +35,21 @@ function Briggs(mset::MeasurementSet, gridspec::GridSpec, robust::Float64)
     return Briggs(imageweights, gridspec, normfactor)
 end
 
-function makegriddedweights(mset::MeasurementSet, gridspec::GridSpec)
-    npol = 4  # Hardcode 4 polarizations for now
-    griddedweights = zeros(npol, gridspec.Nx, gridspec.Ny)
-    @views for row in mset
-        makegriddedweights!(griddedweights, row, mset.lambdas, gridspec)
+function makegriddedweights(uvdata, gridspec::GridSpec)
+    griddedweights = zeros(4, gridspec.Nx, gridspec.Ny)
+
+    for uvdatum in uvdata
+        upx, vpx = lambda2px(Int, uvdatum.u, uvdatum.v, gridspec)
+
+        if 1 <= upx <= gridspec.Nx && 1 <= vpx <= gridspec.Ny
+            griddedweights[1, upx, vpx] += uvdatum.xx.re
+            griddedweights[2, upx, vpx] += uvdatum.xy.re
+            griddedweights[3, upx, vpx] += uvdatum.yx.re
+            griddedweights[4, upx, vpx] += uvdatum.yy.re
+        end
     end
 
     return griddedweights
-end
-
-function makegriddedweights!(griddedweights, row, lambdas, gridspec)
-    for (chan, lambda) in enumerate(lambdas)
-        upx, vpx = lambda2px(Int, row.uvw[1] / lambda, -row.uvw[2] / lambda, gridspec)
-
-        if upx in axes(griddedweights, 2) && vpx in axes(griddedweights, 3)
-            for pol in 1:4
-                weight = (
-                    !row.flag[pol, chan] *
-                    !row.flagrow[] * 
-                    row.weight[pol] *
-                    row.weightspectrum[pol, chan]
-                )
-                
-                if isfinite(weight)
-                    griddedweights[pol, upx, vpx] += weight
-                end
-            end
-        end
-    end
 end
 
 @views function (w::Briggs)(ulambda, vlambda)
@@ -90,5 +62,5 @@ end
 end
 
 function (w::Natural)(ulambda, vlambda)
-    return 1 / w.totalweights
+    return SVector{4, Float32}(1, 1, 1, 1)
 end
