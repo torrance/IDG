@@ -1,110 +1,144 @@
-using FFTW: fft, ifft, fftshift, ifftshift
+using FFTW
 using IDGjl
 using PyCall
 using Test
 using Unitful
 using UnitfulAngles
+using Interpolations
+
+# Now do a direct FT of this data into the image plane
+function dft!(dft, uvdata, gridspec, normfactor)
+    rowscomplete = 0
+    Threads.@threads for lmpx in CartesianIndices(dft)
+        lpx, mpx = Tuple(lmpx)
+        if lpx == size(dft)[2]
+            rowscomplete += 1
+            print("\r", rowscomplete / size(dft)[1] * 100)
+        end
+
+        l, m = IDGjl.px2sky(lpx, mpx, gridspec)
+        ndash = sqrt(1 - l^2 - m^2) - 1
+
+        val = zero(ComplexF64)
+        for uvdatum in uvdata
+            val += 0.5 * (uvdatum.xx + uvdatum.yy) * exp(
+                2π * 1im * (uvdatum.u * l + uvdatum.v * m + uvdatum.w * ndash)
+            )
+        end
+        dft[lpx, mpx] = val / normfactor
+    end
+end
+
+function convolutionalsample!(grid, gridspec, uvdata, kernel, width; uoffset=0, voffset=0)
+    for uvdatum in uvdata
+        upx, vpx = IDGjl.lambda2px(uvdatum.u - uoffset, uvdatum.v - voffset, gridspec)
+
+        for ypx in axes(grid, 2)
+            dypx = abs(ypx - vpx)
+            if 0 <= dypx <= width
+                for xpx in axes(grid, 1)
+                    dxpx = abs(xpx - upx)
+                    if 0 <= dxpx <= width
+                        grid[xpx, ypx] += kernel(sqrt(dxpx^2 + dypx^2)) * 0.5 * (uvdatum.xx + uvdatum.yy)
+                    end
+                end
+            end
+        end
+    end
+end
+
+function mkoversampledtaper(taper, gridspec, oversample)
+    oversampledsubgrid = IDGjl.GridSpec(
+        gridspec.Nx * oversample,
+        gridspec.Ny * oversample,
+        gridspec.scalelm,
+        gridspec.scaleuv
+    )
+    tapergrid = zeros(oversampledsubgrid.Ny, oversampledsubgrid.Ny)
+    @time Threads.@threads for lm in CartesianIndices(tapergrid)
+        lpx, mpx = Tuple(lm)
+        l, m = IDGjl.px2sky(lpx, mpx, oversampledsubgrid)
+        tapergrid[lm] = taper(l, m)
+    end
+    @time Tapergrid = rfft(ifftshift(tapergrid)) / (gridspec.Nx * gridspec.Ny)
+    midy = size(Tapergrid)[2] ÷ 2 + 1
+    Tapergrid = real.(fftshift(Tapergrid, 2))[:, midy:end]
+
+    println("Calculating rs...")
+    rs = similar(Tapergrid, Float64)
+    @time ((rs) -> for xy in CartesianIndices(rs)
+        xpx, ypx = Tuple(xy) .- 1
+        rs[xy] = sqrt(xpx^2 + ypx^2) / oversample
+    end)(rs)
+
+    # Remove duplicate entries
+    println("Deduplicate...")
+    @time idx = unique(i -> rs[i], eachindex(rs))
+    rs, Taper = rs[idx], Tapergrid[idx]
+
+    # Sort
+    println("Sorting...")
+    @time idx = sortperm(rs)
+    rs, Taper = rs[idx], Taper[idx]
+
+    return LinearInterpolation(rs, Taper)
+end
 
 # @testset "IDGjl.jl" begin
-#     mset = IDGjl.MeasurementSet("/home/torrance/testdata/1215555160/1215555160.ms", chanstart=1, chanend=196)
-    
-#     Nsize = 4000
+#     mset = IDGjl.MeasurementSet("/home/torrance/testdata/1215555160/1215555160.ms", chanstart=92, chanend=92)
+
+#     masterpadding = round(Int, 0.7 * 4000 / 2)
+#     Nsize = 4000 + 2 * masterpadding
 #     gridspec = IDGjl.GridSpec(Nsize, Nsize, 20u"arcsecond")
 
-#     taper, kernelwidth = IDGjl.mkgaussiantaper(gridspec, 1e-2)
-#     println("Kernel width $(kernelwidth)")
+#     # taper, padding = IDGjl.mkgaussiantaper(gridspec, 1e-2)
+#     taper, padding = IDGjl.mkkbtaper(gridspec, 1e-4)
+#     println("Kernel width $(padding)")
 
 #     # taper = (l, m) -> 1
 #     # kernelwidth = 0
 
 #     println("Imageweight...")
-#     # @time imageweighter = IDGjl.Briggs(IDGjl.mkuvdata(mset, makepsf=true), gridspec, 0.)
-#     @time imageweighter = IDGjl.Natural(IDGjl.mkuvdata(mset, makepsf=true), gridspec)
+#     @time imageweighter = IDGjl.Briggs(IDGjl.mkuvdata(mset, makepsf=true), gridspec, 0.)
+#     # @time imageweighter = IDGjl.Natural(IDGjl.mkuvdata(mset, makepsf=true), gridspec)
+
+#     println("Collecting uvdata into memory...")
+#     uvdata = collect(IDGjl.mkuvdata(mset, imageweighter=imageweighter))
+#     println(typeof(uvdata))
+
+#     # println("DFT...")
+#     # dft = zeros(ComplexF64, Nsize, Nsize)
+#     # dft!(dft, uvdata, gridspec, imageweighter.normfactor[1])
 
 #     subgrids = IDGjl.Subgrids(
 #         gridspec,
 #         IDGjl.GridSpec(64, 64, scaleuv=gridspec.scaleuv),
-#         kernelwidth,
-#         IDGjl.Subgrid[],
+#         padding,
 #     )
 
 #     println("Mmwpartition....")
-#     @time IDGjl.partition!(subgrids, IDGjl.mkuvdata(mset, imageweighter=imageweighter, makepsf=false), imageweighter)
+#     @time IDGjl.partition!(subgrids, IDGjl.mkuvdata(mset, imageweighter=imageweighter, makepsf=false))
 
 #     subgrid = subgrids.children[3]
 #     println("Subgrid has $(length(subgrid.children)) children")
 
-#     subgridspec = IDGjl.GridSpec(64, 64, scaleuv=gridspec.scaleuv)
-#     mastergrid = zeros(ComplexF64, Nsize, Nsize)
+#     mastergrid = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
 #     IDGjl.parallelgrid!(mastergrid, subgrids, taper)
 
-#     img = fftshift(ifft(ifftshift(mastergrid))) * gridspec.Nx * gridspec.Ny / imageweighter.normfactor[1]
-#     for lm in CartesianIndices(img)
+#     idg = fftshift(ifft(ifftshift(mastergrid))) * gridspec.Nx * gridspec.Ny / imageweighter.normfactor[1]
+#     for lm in CartesianIndices(idg)
 #         lpx, mpx = Tuple(lm)
 #         l, m = IDGjl.px2sky(lpx, mpx, gridspec)
-#         img[lm] /= taper(l, m)
+#         idg[lm] /= taper(l, m)
 #     end
 
+#     return idg[1 + masterpadding:end - masterpadding, 1 + masterpadding:end - masterpadding]
+#     return dft, idg
 #     return mastergrid, img, imageweighter
 
 #     # TODO:
 #     # Understand what the output should be with w-correction term multiplied through
 #     # Double check w layer tolerance in wsclean/IDG
-# end
-
-# @testset "Gridder" begin
-#     Ngrid = 64
-#     gridspec = IDGjl.GridSpec(4000, 4000, 20u"arcsecond")
-#     subgridspec = IDGjl.GridSpec(Ngrid, Ngrid, scaleuv=gridspec.scaleuv)
-
-#     function makec(wlambda)
-#         c = zeros(ComplexF32, Ngrid, Ngrid)
-#         for mpx in 1:Ngrid, lpx in 1:Ngrid
-#             lpxzeroed = lpx - (Ngrid ÷ 2 + 1)
-#             mpxzeroed = mpx - (Ngrid ÷ 2 + 1)
-#             l, m = IDGjl.px2sky(lpx, mpx, subgridspec)
-#             n2 = 1 - l^2 - m^2
-#             ndash = 0.
-#             if n2 >= 0
-#                 ndash = sqrt(n2) - 1
-#             end
-#             ndash = sqrt(n2) - 1
-#             c[lpx, mpx] = exp(-(lpxzeroed^2 + mpxzeroed^2) / (2 * 9^2)) * exp(2π * 1im * wlambda * ndash)
-#         end
-#         return c
-#     end
-
-#     mastergrid = zeros(ComplexF32, Ngrid, Ngrid)
-#     expected = zeros(Complex, Ngrid, Ngrid)
-#     for w0lambda in [0, 3, 7, 9, 11, 13, 44, 29, 21, 91]
-#         subgrid = IDGjl.Subgrid(2000, 2000, w0lambda)
-
-#         visgrid = zeros(ComplexF32, Ngrid, Ngrid)
-#         visgrid[9:end-8, 9:end-8] = rand([0, 0, 0, 0, 0, 0, 1], Ngrid - 16, Ngrid - 16)
-
-#         for uv in CartesianIndices(visgrid)
-#             upx, vpx = Tuple(uv)
-#             if visgrid[upx, vpx] != 0
-#                 ulambda, vlambda = IDGjl.px2lambda(subgrid.u0px + 0.5 + upx - subgridspec.Nx ÷ 2 - 1, subgrid.v0px + 0.5 + vpx - subgridspec.Nx ÷ 2 - 1, gridspec)
-#                 val = 0.0 + 0.0im
-#                 for (A, l, m) in [(1, 0, 0), (2, sin(deg2rad(2)), sin(deg2rad(2))), (3, sin(deg2rad(-2)), sin(deg2rad(-2)))]
-#                     val += A * exp(-2π * 1im * (ulambda * l + vlambda * m + w0lambda * (sqrt(1 - l^2 -m^2) - 1)))
-#                 end
-#                 push!(subgrid.children, IDGjl.UVDatum(ulambda, vlambda, w0lambda, val, 0, 0, val))
-#             end
-#         end
-        
-#         mastergrid += IDGjl.gridder(subgrid, gridspec, subgridspec, makec(w0lambda))
-
-#         subgrid = IDGjl.Subgrid(2000, 2000, 0, subgrid.children) # Inherit same children
-#         grid = zeros(ComplexF32, Ngrid, Ngrid)
-#         IDGjl.dft!(grid, subgrid, gridspec, subgridspec, makec(0))
-#         expected += grid
-#     end
-
-#     # TODO Understand the indexing offset here
-#     diff = expected[end:-1:2, end:-1:2] .- fftshift(fft(ifftshift(mastergrid)))[2:end, 2:end]
-#     @test all(isapprox.(diff, 0, atol=1e-5))
 # end
 
 @testset "Partitioning" begin
@@ -124,7 +158,7 @@ using UnitfulAngles
     padding = 8
 
     subgrids = IDGjl.Subgrids(gridspec, subgridspec, padding)
-    IDGjl.partition!(subgrids, uvdata)
+    IDGjl.partition!(subgrids, uvdata, 1)
 
     subgrid = subgrids.children[1]
 
@@ -170,33 +204,46 @@ end
     # Test subrid inversion
     gridspec = IDGjl.GridSpec(64, 64, scaleuv=1)
     subgridspec = IDGjl.GridSpec(64, 64, scaleuv=gridspec.scaleuv)
-    onef = (l, m) -> 1.
+    # taper, padding = IDGjl.mkkbtaper(gridspec, 1e-5)
+    taper, padding, sigmalm = IDGjl.mkgaussiantaper(gridspec, 1e-12)
+    Taper = (rpx) -> 2π * (sigmalm * gridspec.scaleuv)^2 * exp(-2 * π^2 * (sigmalm * gridspec.scaleuv)^2 * rpx^2)
 
     expected = zeros(ComplexF32, 64, 64)
-    expected[1 + 8:end - 8, 1 + 8:end - 8] = rand(Float32, gridspec.Nx - 16, gridspec.Ny - 16) .+ 1im .* rand(Float32, gridspec.Nx - 16, gridspec.Ny - 16)
-    
+    expected[1 + padding:end - padding, 1 + padding:end - padding] = rand(Float32, gridspec.Nx - 2 * padding, gridspec.Ny - 2 * padding) .+ 1im .* rand(Float32, gridspec.Nx - 2 * padding, gridspec.Ny - 2 * padding)
+
     # Set some as zero, i.e. missing UV coverage
     expected[rand([true, false, false], 64, 64)] .= 0
-    
-    subgrid = IDGjl.Subgrid(1, 1, 0, IDGjl.UVDatum[])
+
+    uvdata = IDGjl.UVDatum[]
     for uv in CartesianIndices(expected)
         upx, vpx = Tuple(uv)
         u, v = IDGjl.px2lambda(upx, vpx, gridspec)
         val = expected[uv]
         if val != 0
-            push!(subgrid.children, IDGjl.UVDatum(u, v, 0, val, 0, 0, val))
+            push!(uvdata, IDGjl.UVDatum(u, v, 0, val, 0, 0, val))
         end
     end
-    grid = IDGjl.gridder(subgrid, gridspec, subgridspec, onef)
 
-    @test all(isapprox.(expected, grid, atol=1E-5))
+    # Taper =  mkoversampledtaper(taper, gridspec, 200)
+    expectedconv = zeros(ComplexF64, 64, 64)
+    convolutionalsample!(expectedconv, subgridspec, uvdata, Taper, padding)
+
+    subgrid = IDGjl.Subgrid(1, 1, 0, uvdata)
+    grid = IDGjl.gridder(subgrid, gridspec, subgridspec, taper)
+
+    @test all(isapprox.(expectedconv, grid, atol=1E-6))
 
     #####
     # Large composite grid
     gridspec = IDGjl.GridSpec(400, 400, scaleuv=1)
     subgridspec = IDGjl.GridSpec(64, 64, scaleuv=gridspec.scaleuv)
+    # taper, padding = IDGjl.mkkbtaper(gridspec, 1e-6)
+    taper, padding, sigmalm = IDGjl.mkgaussiantaper(gridspec, 1e-12)
+    Taper = (rpx) -> 2π * (sigmalm * gridspec.scaleuv)^2 * exp(-2 * π^2 * (sigmalm * gridspec.scaleuv)^2 * rpx^2)
 
     expected = rand(Float32, gridspec.Nx, gridspec.Ny) .+ 1im .* rand(Float32, gridspec.Nx, gridspec.Ny)
+    # Set some as zero, i.e. missing UV coverage
+    expected[rand([true, false, false, false, false, false, false, false], 400, 400)] .= 0
 
     # Create uvdata
     uvdata = IDGjl.UVDatum[]
@@ -204,37 +251,114 @@ end
         upx, vpx = Tuple(uv)
         u, v = IDGjl.px2lambda(upx, vpx, gridspec)
         val = expected[upx, vpx]
-        push!(uvdata, IDGjl.UVDatum(u, v, 0, val, 0, 0, val))
+        if val != 0
+            push!(uvdata, IDGjl.UVDatum(u, v, 0, val, 0, 0, val))
+        end
     end
 
-    # Partition data into subgrids
-    subgrids = IDGjl.Subgrids(gridspec, subgridspec, 8)
-    IDGjl.partition!(subgrids, uvdata)
+    # Taper = mkoversampledtaper(taper, subgridspec, 200)
+    expectedconv = zeros(ComplexF32, gridspec.Nx, gridspec.Ny)
+    convolutionalsample!(expectedconv, gridspec, uvdata, Taper, padding)
 
-    # Check all UVDatum exist in exactly one partition
-    mastergrid = zeros(Int, 400, 400)
-    for subgrid in subgrids.children, uvdatum in subgrid.children
-        upx, vpx = IDGjl.lambda2px(Int, uvdatum.u, uvdatum.v, gridspec)
-        mastergrid[upx, vpx] += 1
-    end
-    @test all(mastergrid .== 1)
+    # IDG
+    subgrids = IDGjl.Subgrids(gridspec, subgridspec, padding)
+    IDGjl.partition!(subgrids, uvdata, 1)
 
     mastergrid = zeros(ComplexF32, gridspec.Nx, gridspec.Ny)
     for subgrid in subgrids.children
-        grid = IDGjl.gridder(subgrid, gridspec, subgridspec, onef)
+        grid = IDGjl.gridder(subgrid, gridspec, subgridspec, taper)
         IDGjl.departition!(mastergrid, grid, subgrid)
     end
 
-    @test all(isapprox.(expected, mastergrid, atol=1E-5))
+    @test all(isapprox.(expectedconv, mastergrid, atol=3E-6))
+end
+
+@testset "Coordinate conversions" begin
+    for (ulambda, vlambda) in eachcol(100 .* rand(2, 100))
+        gridspec = IDGjl.GridSpec(3000, 3000, scaleuv=rand() + 0.5)
+        upx, vpx = IDGjl.lambda2px(ulambda, vlambda, gridspec)
+        ulambdaagain, vlambdaagain = IDGjl.px2lambda(upx, vpx, gridspec)
+        @test ulambda ≈ ulambdaagain
+        @test vlambda ≈ vlambdaagain
+    end
+end
+
+@testset "Imperfect grid" begin
+    # Create uvw data with a few sources, and uvw points randomly in a cube
+    uvws = rand(Float32, 3, 2000) .* [1000 1000 0]' .- [500 500 0;]'
+    uvws .= round.(Int, uvws)
+
+    # Source locations in radians, wrt to phase center, with 10 degree FOV
+    sources = deg2rad.(
+        rand(Float32, 2, 30) * 18 .- 9
+    )
+    sources[:, 1] .= 0
+
+    uvdata = IDGjl.UVDatum[]
+    for (u, v, w) in eachcol(uvws)
+        val = zero(ComplexF32)
+        for (ra, dec) in eachcol(sources)
+            l, m = sin(ra), sin(dec)
+            val += exp(-2π * 1im * (u * l + v * m + w * IDGjl.ndash(l, m)))
+        end
+        push!(uvdata, IDGjl.UVDatum(u, v, w, val, 0, 0, val))
+    end
+
+    # IDG
+    gridspec = IDGjl.GridSpec(3000, 3000, scaleuv=0.6)
+    subgridspec = IDGjl.GridSpec(128, 128, scaleuv=gridspec.scaleuv)
+    taper, padding, sigmalm = IDGjl.mkgaussiantaper(gridspec, 1e-12)
+    Taper = (rpx) -> 2π * (sigmalm * gridspec.scaleuv)^2 * exp(-2 * π^2 * (sigmalm * gridspec.scaleuv)^2 * rpx^2)
+    println("Taper with $(padding) padding")
+
+    subgrids = IDGjl.Subgrids(gridspec, subgridspec, padding)
+    IDGjl.partition!(subgrids, uvdata, 1)
+    println("Original uv data points: $(length(uvdata)) After partitioning: $(sum(length(subgrid.children) for subgrid in subgrids.children))")
+
+    # Compare single subgrid
+    _, idx = findmax([length(subgrid.children) for subgrid in subgrids.children])
+    subgrid = subgrids.children[idx]
+    subgridded = IDGjl.gridder(subgrid, gridspec, subgridspec, taper)
+
+    uoffset, voffset = IDGjl.px2lambda(
+        subgrid.u0px + (subgridspec.Nx ÷ 2),
+        subgrid.v0px + (subgridspec.Ny ÷ 2),
+        gridspec
+    )
+    expected = zeros(ComplexF64, subgridspec.Nx, subgridspec.Ny)
+    convolutionalsample!(expected, subgridspec, subgrid.children, Taper, 2 * padding, uoffset=uoffset, voffset=voffset)
+
+    @test all(isapprox.(expected, subgridded, atol=5e-7))
+
+    mastergrid = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
+    IDGjl.parallelgrid!(mastergrid, subgrids, taper)
+
+    # Manual convolutional sample
+    expected = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
+    convolutionalsample!(expected, gridspec, uvdata, Taper, padding)
+
+    @test all(isapprox.(expected, mastergrid, atol=5e-7))
 end
 
 # @testset "Imperfect grid with w terms" begin
+#     Nsize = 2000
+
 #     # Create uvw data with a few sources, and uvw points randomly in a cube
-#     uvws = rand(Float32, 3, 2000) .* [500 500 0;]' .- [250 250 250;]'
+#     # uvws = cat(
+#     #     rand(Float32, 3, 1500) .* [1000 500 0;]' .+ [-500 0 20.5;]',
+#     #     rand(Float32, 3, 1500) .* [1000 -500 0;]' .+ [-500 0 -14.5;]',
+#     # dims=(2))
+#     uvws = rand(Float32, 3, 5000) .* [1000 1000 0;]' .- [500 500 (-0.5);]'
+#     # vuvws = zeros(3, 0)
+#     # for n in 1.1:.1:2
+#     #     uvws = cat(uvws, _uvws ./ n, dims=2)
+#     # end
+#     # uvws[3, :] .= 100
+#     println(size(uvws))
 
 #     # Source locations in radians, wrt to phase center, with 10 degree FOV
 #     sources = deg2rad.(
-#         rand(Float32, 2, 30) * 18 .- 9
+#         rand(Float32, 2, 50) * 18 .- 9
 #     )
 #     sources[:, 1] .= 0
 #     # sources = Float32[0 0;]'
@@ -250,66 +374,62 @@ end
 #         push!(uvdata, IDGjl.UVDatum(u, v, w, val, 0, 0, val))
 #     end
 
-#     # Now do a direct FT of this data into the image plane
-#     function dft!(dft, uvdata, gridspec)
-#         Threads.@threads for lmpx in CartesianIndices(dft)
-#             lpx, mpx = Tuple(lmpx)
-#             l, m = IDGjl.px2sky(lpx, mpx, gridspec)
-#             ndash = sqrt(1 - l^2 - m^2) - 1
-
-#             val = zero(ComplexF64)
-#             for uvdatum in uvdata
-#                 val += 0.5 * (uvdatum.xx + uvdatum.yy) * exp(
-#                     2π * 1im * (uvdatum.u * l + uvdatum.v * m + uvdatum.w * ndash)
-#                 )
-#             end
-#             dft[lpx, mpx] = val / size(uvws)[2]
-#         end
-#     end
-
 #     print("Running DFT...")
-#     gridspec = IDGjl.GridSpec(2000, 2000, 40u"arcsecond")
+#     gridspec = IDGjl.GridSpec(Nsize, Nsize, 40u"arcsecond")
 #     @assert maximum(uvws[1, :]) < IDGjl.px2lambda(gridspec.Nx, gridspec.Ny ÷ 2 + 1, gridspec)[1]
 #     @assert maximum(uvws[2, :]) < IDGjl.px2lambda(gridspec.Nx ÷ 2 + 1, gridspec.Ny, gridspec)[2]
 #     @assert minimum(uvws[1, :]) > IDGjl.px2lambda(1, gridspec.Ny ÷ 2 + 1, gridspec)[1]
 #     @assert minimum(uvws[2, :]) > IDGjl.px2lambda(gridspec.Nx ÷ 2 + 1, 1, gridspec)[2]
 #     dft = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
-#     dft!(dft, uvdata, gridspec)
+#     @time dft!(dft, uvdata, gridspec, length(uvdata))
 #     println(" done.")
 #     println("Max value in DFT: $(maximum(real.(dft)))")
 
 #     # Now it's IDG time
-#     c = (l, m) -> 1
-#     taper, kernelwidth = IDGjl.mkgaussiantaper(gridspec, 1e-2)
+#     masterpadding = round(Int, (Nsize / 0.6) / 2)
+#     gridspec = IDGjl.GridSpec(Nsize + 2 * masterpadding, Nsize + 2 * masterpadding, 40u"arcsecond")
+#     taper, padding = IDGjl.mkkbtaper(gridspec, 1e-4)
+#     println("Using kernel padding $(padding)")
+#     # taper, padding = (l, m) -> 1, 1
+#     # taper, padding = IDGjl.mkgaussiantaper(gridspec, 1e-5)
 #     subgridspec = IDGjl.GridSpec(64, 64, scaleuv=gridspec.scaleuv)
-#     subgrids = IDGjl.Subgrids(gridspec, subgridspec, kernelwidth, IDGjl.Subgrid[])
-    
-#     wlayers = Dict{Int, Array{IDGjl.UVDatum, 1}}()
-#     for uvdatum in uvdata
-#         wlayer = get!(wlayers, round(Int, uvdatum.w)) do 
-#             IDGjl.UVDatum[]
-#         end
-#         push!(wlayer, uvdatum)
-#     end
-#     for wlayer in values(wlayers)
-#         append!(
-#             subgrids.children,
-#             IDGjl.partitionconsumer(wlayer, subgrids.gridspec, subgrids.subgridspec, subgrids.padding)
-#         )
-#     end
+#     subgrids = IDGjl.Subgrids(gridspec, subgridspec, padding)
+
+#     println("subgridspec edges:", subgridspec.scaleuv * 63)
+
+
+#     IDGjl.partition!(subgrids, uvdata, 50)
 #     println("Original uv data points: $(length(uvdata)) After partitioning: $(sum(length(subgrid.children) for subgrid in subgrids.children))")
 
-#     mastergrid = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
-#     IDGjl.parallelgrid!(mastergrid, subgrids, taper)
-#     idg = fftshift(ifft(ifftshift(mastergrid))) * gridspec.Nx * gridspec.Ny / length(uvdata)
-
-#     for lm in CartesianIndices(idg)
-#         lpx, mpx = Tuple(lm)
-#         l, m = IDGjl.px2sky(lpx, mpx, gridspec)
-#         idg[lm] /= taper(l, m)
+#     for subgrid in subgrids.children
+#         println(subgrid.w0lambda)
 #     end
+
+#     mastergrid = zeros(ComplexF64, gridspec.Nx, gridspec.Ny)
+#     println("Gridding...")
+#     @time IDGjl.parallelgrid!(mastergrid, subgrids, taper)
+#     return mastergrid
+
+#     println("FFT...")
+#     @time idg = fftshift(ifft(ifftshift(mastergrid))) * gridspec.Nx * gridspec.Ny / length(uvdata)
+
+#     function removetaper!(img, gridspec, taper)
+#         Threads.@threads for lm in CartesianIndices(img)
+#             lpx, mpx = Tuple(lm)
+#             l, m = IDGjl.px2sky(lpx, mpx, gridspec)
+#             n2 = 1 - l^2 - m^2
+#             if n2 < 0
+#                 img[lm] = NaN
+#             else
+#                 ndash = sqrt(n2) - 1
+#                 img[lm] *= 1 / taper(l, m) # exp(2π * 1im * 100 * ndash) / taper(l, m) #
+#             end
+#         end
+#     end
+#     println("Removing taper...")
+#     @time removetaper!(idg, gridspec, taper)
 
 #     println("Max value in IDG: $(maximum(real.(idg)))")
 
-#     return dft, idg
+#     return dft, idg[1+masterpadding:end-masterpadding, 1+masterpadding:end-masterpadding]
 # end
