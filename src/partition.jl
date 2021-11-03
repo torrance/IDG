@@ -25,12 +25,12 @@ function Subgrids(gridspec::GridSpec, subgridspec::GridSpec, padding::Int)
     Subgrids(gridspec, subgridspec, padding, Subgrid[])
 end
 
-function partition!(subgrids::Subgrids, uvdata)
+function partition!(subgrids::Subgrids, uvdata, wstep)
     # Separate data in w layers and create UVData
     println("Creating w layers...")
     wlayers = Dict{Int, Array{UVDatum, 1}}()
     @time for uvdatum in uvdata
-        wlayer = get!(wlayers, round(Int, uvdatum.w)) do
+        wlayer = get!(wlayers, round(Int, uvdatum.w / wstep)) do
             UVDatum[]
         end
         push!(wlayer, uvdatum)
@@ -40,9 +40,15 @@ function partition!(subgrids::Subgrids, uvdata)
     println("Partitioning...")
     @time begin
         tasks = Task[]
-        for wlayer in values(wlayers)
+        for (windex, wlayer) in wlayers
             task = Threads.@spawn try
-                partitionconsumer(wlayer, subgrids.gridspec, subgrids.subgridspec, subgrids.padding)
+                partitionconsumer(
+                    wlayer,
+                    windex * wstep,
+                    subgrids.gridspec,
+                    subgrids.subgridspec,
+                    subgrids.padding
+                )
             catch e
                showerror(stdout, e, catch_backtrace())
             end
@@ -57,15 +63,15 @@ function partition!(subgrids::Subgrids, uvdata)
     println("Subgrids: $(length(occupancy)) Occupancy (min/median/max): $(minimum(occupancy))/$(median(occupancy))/$(maximum(occupancy))")
 end
 
-function partitionconsumer(wlayer, gridspec, subgridspec, padding)
+function partitionconsumer(wlayer, wvalue, gridspec, subgridspec, padding)
     subgrids = Subgrid[]
     for uvdatum in wlayer
-        _partitionconsumer!(subgrids, uvdatum, gridspec, subgridspec, padding)
+        _partitionconsumer!(subgrids, wvalue, uvdatum, gridspec, subgridspec, padding)
     end
     return subgrids
 end
 
-function _partitionconsumer!(subgrids::Vector{Subgrid}, uvdatum, gridspec, subgridspec, padding)
+function _partitionconsumer!(subgrids::Vector{Subgrid}, wvalue, uvdatum, gridspec, subgridspec, padding)
     upx, vpx = lambda2px(uvdatum.u, uvdatum.v, gridspec)
 
     # Now check through existing subgrids to see if our uvdatum already overlaps
@@ -84,7 +90,7 @@ function _partitionconsumer!(subgrids::Vector{Subgrid}, uvdatum, gridspec, subgr
     u0px = round(Int, upx - subgridspec.Nx ÷ 2)
     v0px = round(Int, vpx - subgridspec.Ny ÷ 2)
 
-    push!(subgrids, Subgrid(u0px, v0px, round(Int32, uvdatum.w), UVDatum[uvdatum]))
+    push!(subgrids, Subgrid(u0px, v0px, wvalue, UVDatum[uvdatum]))
 end
 
 function departition!(mastergrid, grid, subgrid::Subgrid)
