@@ -10,12 +10,11 @@ using FFTW: fft, ifft, fftshift, ifftshift
 function mkgaussiantaper(gridspec, mu)
     maxr = (minimum([gridspec.Nx, gridspec.Ny]) ÷ 2 - 1) * gridspec.scalelm
     sigmalm = maxr * sqrt(-1 / log(mu))
-    sigmauv = 1 / sigmalm
+    sigmauv = 1 / (2π * sigmalm)
     kernelwidthpx = round(Int, sqrt(-2 * sigmauv^2 * log(mu)) / gridspec.scaleuv)
-    println("sigmalm: $(sigmalm) sigmauv: $(sigmauv) kernelwidth: $(kernelwidthpx)")
 
     taper = (l, m) -> exp(-(l^2 + m^2) / (2 * sigmalm^2))
-    return taper, kernelwidthpx
+    return taper, kernelwidthpx, sigmalm
 end
 
 function mkkbtaper(gridspec, mu; alpha=14)
