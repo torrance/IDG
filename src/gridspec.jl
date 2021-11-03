@@ -3,8 +3,8 @@ using Unitful: Quantity, uconvert, @u_str
 struct GridSpec
     Nx::Int64
     Ny::Int64
-    scalelm::Float32  # The scale of pixels in lm space
-    scaleuv::Float32  # Corresponding scale of pixels in uv space
+    scalelm::Float64  # The scale of pixels in lm space
+    scaleuv::Float64  # Corresponding scale of pixels in uv space
 end
 
 function GridSpec(Nx, Ny, scale::Quantity)
@@ -35,20 +35,16 @@ end
     )
 end
 
-function px2lambda(upx, vpx, gridspec::GridSpec)
+@inline @fastmath function px2lambda(upx, vpx, gridspec::GridSpec)
     return (
         (upx - gridspec.Nx ÷ 2 - 1) * gridspec.scaleuv,
         (vpx - gridspec.Ny ÷ 2 - 1) * gridspec.scaleuv
     )
 end
 
-function px2sky(lpx, mpx, gridspec::GridSpec)
+@inline @fastmath function px2sky(lpx, mpx, gridspec::GridSpec)
     return (
         (lpx - gridspec.Nx ÷ 2 - 1) * gridspec.scalelm,
         (mpx - gridspec.Ny ÷ 2 - 1) * gridspec.scalelm
     )
-end
-
-function px2sky(N::Int, gridspec::GridSpec)
-    return ((1:N) .- (N ÷ 2 + 1)) .* gridspec.scalelm
 end
